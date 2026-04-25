@@ -14,11 +14,11 @@ describe('Navbar', () => {
             <MemoryRouter>
                 <ToastProvider>
                     <ThemeProvider>
-                    <Navbar 
-                        walletAddress={null} 
-                        onConnect={mockOnConnect} 
-                        onDisconnect={mockOnDisconnect} 
-                    />
+                        <Navbar
+                            walletAddress={null}
+                            onConnect={mockOnConnect}
+                            onDisconnect={mockOnDisconnect}
+                        />
                     </ThemeProvider>
                 </ToastProvider>
             </MemoryRouter>
@@ -27,8 +27,8 @@ describe('Navbar', () => {
         expect(screen.getByText(/YieldVault/)).toBeInTheDocument();
         expect(screen.getByText(/RWA/)).toBeInTheDocument();
         expect(screen.getByText('Vaults')).toBeInTheDocument();
-        expect(screen.getByText('Portfolio')).toBeInTheDocument();
         expect(screen.getByText('Analytics')).toBeInTheDocument();
+        expect(screen.getByText('Portfolio')).toBeInTheDocument();
     });
 
     it('renders the wallet connect button', () => {
@@ -36,11 +36,11 @@ describe('Navbar', () => {
             <MemoryRouter>
                 <ToastProvider>
                     <ThemeProvider>
-                    <Navbar 
-                        walletAddress={null} 
-                        onConnect={mockOnConnect} 
-                        onDisconnect={mockOnDisconnect} 
-                    />
+                        <Navbar
+                            walletAddress={null}
+                            onConnect={mockOnConnect}
+                            onDisconnect={mockOnDisconnect}
+                        />
                     </ThemeProvider>
                 </ToastProvider>
             </MemoryRouter>
@@ -56,16 +56,35 @@ describe('Navbar', () => {
             <MemoryRouter>
                 <ToastProvider>
                     <ThemeProvider>
-                    <Navbar 
-                        walletAddress={fullAddress} 
-                        onConnect={mockOnConnect} 
-                        onDisconnect={mockOnDisconnect} 
-                    />
+                        <Navbar
+                            walletAddress={fullAddress}
+                            onConnect={mockOnConnect}
+                            onDisconnect={mockOnDisconnect}
+                        />
                     </ThemeProvider>
                 </ToastProvider>
             </MemoryRouter>
         );
 
         expect(screen.getByText(expectedAddress)).toBeInTheDocument();
+    });
+
+    it('shows a network badge when wallet is connected', () => {
+        const fullAddress = 'GABC1234567890123456789012345678901234567890123456789012';
+        render(
+            <MemoryRouter>
+                <ToastProvider>
+                    <ThemeProvider>
+                        <Navbar
+                            walletAddress={fullAddress}
+                            onConnect={mockOnConnect}
+                            onDisconnect={mockOnDisconnect}
+                        />
+                    </ThemeProvider>
+                </ToastProvider>
+            </MemoryRouter>
+        );
+
+        expect(screen.getByText(/testnet|mainnet/i)).toBeInTheDocument();
     });
 });

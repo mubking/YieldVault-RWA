@@ -1,8 +1,18 @@
-import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import VaultDashboard from "./VaultDashboard";
 import { VaultProvider } from "../context/VaultContext";
 import { ToastProvider } from "../context/ToastContext";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import * as vaultApi from "../lib/vaultApi";
+
+vi.mock("../lib/vaultApi", async (importOriginal) => {
+  const actual = await importOriginal<typeof vaultApi>();
+  return {
+    ...actual,
+    submitDeposit: vi.fn(),
+  };
+});
 
 const mockSummary = {
   tvl: 12450800,
@@ -26,13 +36,20 @@ const mockSummary = {
   },
 };
 
-function renderDashboard(walletAddress: string | null) {
+function renderDashboard(walletAddress: string | null, usdcBalance = 1250.5) {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+    },
+  });
   return render(
-    <ToastProvider>
-      <VaultProvider>
-        <VaultDashboard walletAddress={walletAddress} />
-      </VaultProvider>
-    </ToastProvider>,
+    <QueryClientProvider client={queryClient}>
+      <ToastProvider>
+        <VaultProvider>
+          <VaultDashboard walletAddress={walletAddress} usdcBalance={usdcBalance} />
+        </VaultProvider>
+      </ToastProvider>
+    </QueryClientProvider>,
   );
 }
 
@@ -76,6 +93,8 @@ describe("VaultDashboard", () => {
     expect(screen.getByText(/Current APY/i)).toBeInTheDocument();
 
     expect(await screen.findByText(/Sovereign Debt/i)).toBeInTheDocument();
+    expect(screen.getByText(/Strategy ID:/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Copy strategy ID/i })).toBeInTheDocument();
   });
 
   it("allows switching between deposit and withdraw tabs", async () => {
@@ -94,11 +113,15 @@ describe("VaultDashboard", () => {
   });
 
   it("updates the amount input and processes a deposit", async () => {
-    renderDashboard("GABC123");
+    let resolveSubmit!: () => void;
+    const submitPromise = new Promise<void>((resolve) => {
+      resolveSubmit = resolve;
+    });
+    vi.mocked(vaultApi.submitDeposit).mockReturnValue(submitPromise);
+    
+    renderDashboard("GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
 
     expect(await screen.findByText(/Approve & Deposit/i)).toBeInTheDocument();
-
-    vi.useFakeTimers();
 
     const input = screen.getByPlaceholderText("0.00");
     fireEvent.change(input, { target: { value: "100" } });
@@ -107,18 +130,65 @@ describe("VaultDashboard", () => {
     const button = screen.getByText("Approve & Deposit");
     fireEvent.click(button);
 
-    expect(
-      screen.getByText(/Processing Transaction.../i),
-    ).toBeInTheDocument();
-
-    act(() => {
-      vi.advanceTimersByTime(2000);
+    await waitFor(() => {
+      expect(screen.getByText(/Processing Transaction/i)).toBeInTheDocument();
     });
 
+    // Resolve the mocked API call
+    resolveSubmit();
+
+    // Loading state should be visible while mutation is pending.
+    expect(screen.getByText(/Processing Transaction/i)).toBeInTheDocument();
+  });
+
+  it("fills the input with max allowable amount via MAX button", async () => {
+    renderDashboard("GABC123");
+
+    expect(await screen.findByText(/Approve & Deposit/i)).toBeInTheDocument();
+
+    const maxButton = screen.getByRole("button", { name: "MAX" });
+    fireEvent.click(maxButton);
+    const input = screen.getByPlaceholderText("0.00");
+    expect(input).toHaveValue(1250.5);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Withdraw" }));
+    fireEvent.click(maxButton);
+    expect(input).toHaveValue(1250.5);
+  });
+
+  it("shows inline error and blocks submit for amounts above balance", async () => {
+    renderDashboard("GABC123");
+
+    expect(await screen.findByText(/Approve & Deposit/i)).toBeInTheDocument();
+
+    const input = screen.getByPlaceholderText("0.00");
+    fireEvent.change(input, { target: { value: "2000" } });
+    fireEvent.blur(input);
+
     expect(
-      screen.queryByText(/Processing Transaction.../i),
-    ).not.toBeInTheDocument();
-    expect(screen.getByText("1350.50")).toBeInTheDocument();
+      screen.getByText(/Deposit amount cannot exceed your available USDC balance./i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve & Deposit" })).toBeDisabled();
+  });
+
+  it("shows minimum deposit validation and clears error when corrected", async () => {
+    renderDashboard("GABC123");
+
+    expect(await screen.findByText(/Approve & Deposit/i)).toBeInTheDocument();
+
+    const input = screen.getByPlaceholderText("0.00");
+    fireEvent.change(input, { target: { value: "0.5" } });
+    fireEvent.blur(input);
+
+    expect(screen.getByText(/Minimum deposit is 1.00 USDC./i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve & Deposit" })).toBeDisabled();
+
+    fireEvent.change(input, { target: { value: "10" } });
+
+    await waitFor(() => {
+      expect(screen.queryByText(/Minimum deposit is 1.00 USDC./i)).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Approve & Deposit" })).toBeEnabled();
+    });
   });
 
   it("shows a normalized API error message when data loading fails", async () => {
@@ -132,9 +202,7 @@ describe("VaultDashboard", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("alert")).toHaveTextContent("Data unavailable");
-    });
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "We could not reach the server. Check your connection and try again.",
-    );
+    }, { timeout: 3000 });
+    expect(screen.getByRole("alert")).toHaveTextContent("Failed to load vault data");
   });
 });

@@ -1,4 +1,7 @@
 import type { KeyboardEvent, ReactNode } from "react";
+import { useTranslation } from "../i18n";
+import { Pagination } from "./Pagination";
+import Skeleton from "./Skeleton";
 
 export type TableSortDirection = "asc" | "desc";
 
@@ -30,7 +33,10 @@ interface DataTableProps<T> {
   onSortChange?: (columnId: string) => void;
   pagination?: PaginationState;
   onPageChange?: (page: number) => void;
+  onPageSizeChange?: (pageSize: number) => void;
   renderRowDetails?: (row: T) => ReactNode;
+  isLoading?: boolean;
+  skeletonRows?: number;
 }
 
 function getCellAlignment(align: DataTableColumn<unknown>["align"]) {
@@ -56,8 +62,12 @@ export function DataTable<T>({
   onSortChange,
   pagination,
   onPageChange,
+  onPageSizeChange,
   renderRowDetails,
+  isLoading = false,
+  skeletonRows = 5,
 }: DataTableProps<T>) {
+  const { t } = useTranslation();
   const handleHeaderKeyDown = (
     event: KeyboardEvent<HTMLButtonElement>,
     columnId: string,
@@ -103,7 +113,7 @@ export function DataTable<T>({
                         onKeyDown={(event) =>
                           handleHeaderKeyDown(event, column.id)
                         }
-                        aria-label={`Sort by ${column.header}`}
+                        aria-label={`${t("dataTable.sortBy")} ${column.header}`}
                       >
                         <span>{column.header}</span>
                         <span className="data-table-sort-indicator" aria-hidden="true">
@@ -119,7 +129,22 @@ export function DataTable<T>({
             </tr>
           </thead>
           <tbody>
-            {rows.length === 0 ? (
+            {isLoading ? (
+              Array.from({ length: skeletonRows }).map((_, rowIndex) => (
+                <tr key={`skeleton-${rowIndex}`} className="data-table-row">
+                  {columns.map((column) => (
+                    <td
+                      key={column.id}
+                      style={{
+                        textAlign: getCellAlignment(column.align),
+                      }}
+                    >
+                      <Skeleton className="skeleton-text" />
+                    </td>
+                  ))}
+                </tr>
+              ))
+            ) : rows.length === 0 ? (
               <tr>
                 <td colSpan={columns.length} className="data-table-empty">
                   {emptyMessage}
@@ -160,7 +185,8 @@ export function DataTable<T>({
       {pagination && pagination.totalPages > 1 && (
         <div className="data-table-pagination">
           <div className="data-table-pagination-summary">
-            Page {pagination.page} of {pagination.totalPages}
+            {t("dataTable.pageLabel")} {pagination.page}{" "}
+            {t("dataTable.pageOf")} {pagination.totalPages}
           </div>
           <div className="data-table-pagination-actions">
             <button
@@ -169,7 +195,7 @@ export function DataTable<T>({
               onClick={() => onPageChange?.(pagination.page - 1)}
               disabled={pagination.page <= 1}
             >
-              Previous
+              {t("dataTable.previous")}
             </button>
             <button
               type="button"
@@ -177,9 +203,20 @@ export function DataTable<T>({
               onClick={() => onPageChange?.(pagination.page + 1)}
               disabled={pagination.page >= pagination.totalPages}
             >
-              Next
+              {t("dataTable.next")}
             </button>
           </div>
+        </div>
+      )}
+      {pagination && (
+        <div className="data-table-pagination" style={{ padding: 0 }}>
+          <Pagination
+            page={pagination.page}
+            pageSize={pagination.pageSize}
+            totalItems={pagination.totalItems}
+            onPageChange={onPageChange}
+            onPageSizeChange={onPageSizeChange}
+          />
         </div>
       )}
     </div>

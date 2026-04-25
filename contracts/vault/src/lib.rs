@@ -1,14 +1,22 @@
 #![no_std]
 
-mod test;
-pub mod strategy;
 pub mod benji_strategy;
+pub mod external_calls;
+#[cfg(test)]
+mod fuzz_math;
+pub mod permissions;
+pub mod strategy;
+pub mod upgrade;
+#[cfg(test)]
+pub mod proxy_tests;
+mod test;
 
+use crate::strategy::StrategyClient;
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, token,
-    Address, Env, Vec,
+    Address, Env, Vec, BytesN,
 };
-use crate::strategy::StrategyClient;
+use crate::upgrade::{get_admin, set_admin, is_initialized, set_initialized};
 
 const MAX_PAGE_SIZE: u32 = 50;
 
@@ -95,20 +103,32 @@ impl YieldVault {
     /// ### Errors
     /// * `VaultError::AlreadyInitialized` - If the admin key is already set.
     pub fn initialize(env: Env, admin: Address, token: Address) -> Result<(), VaultError> {
-        if env.storage().instance().has(&DataKey::Admin) {
+        if is_initialized(&env) {
             return Err(VaultError::AlreadyInitialized);
         }
 
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        set_admin(&env, &admin);
+        set_initialized(&env);
+        
         env.storage().instance().set(&DataKey::TokenAsset, &token);
         env.storage().instance().set(&DataKey::TotalAssets, &0i128);
         env.storage().instance().set(&DataKey::DaoThreshold, &1i128);
         env.storage().instance().set(&DataKey::ProposalNonce, &0u32);
+        Ok(())
+    }
+
+    /// Upgrades the contract code to a new WASM hash.
+    /// Only the Admin can call this.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin = get_admin(&env).expect("Admin not set");
+        admin.require_auth();
+
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
     /// Set or update the active strategy connector.
     pub fn set_strategy(env: Env, strategy: Address) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = get_admin(&env).expect("Admin not set");
         admin.require_auth();
         env.storage().instance().set(&DataKey::Strategy, &strategy);
     }
@@ -116,23 +136,10 @@ impl YieldVault {
     /// Read the active strategy address.
     pub fn strategy(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::Strategy)
-
-        // Initialize the unified state
-        let state = VaultState {
-            total_shares: 0,
-            total_assets: 0,
-            is_paused: false,
-        };
-        env.storage().instance().set(&DataKey::State, &state);
-
-        env.storage().instance().set(&DataKey::DaoThreshold, &1i128);
-        env.storage().instance().set(&DataKey::ProposalNonce, &0u32);
-
-        Ok(())
     }
 
     pub fn set_pause(env: Env, paused: bool) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = get_admin(&env).expect("Admin not set");
         admin.require_auth();
 
         let mut state = Self::get_state(&env);
@@ -165,8 +172,12 @@ impl YieldVault {
 
     /// Read the total underlying assets (idle in vault + invested in strategy).
     pub fn total_assets(env: Env) -> i128 {
-        let idle_assets = env.storage().instance().get::<_, i128>(&DataKey::TotalAssets).unwrap_or(0);
-        
+        let idle_assets = env
+            .storage()
+            .instance()
+            .get::<_, i128>(&DataKey::TotalAssets)
+            .unwrap_or(0);
+
         let strategy_assets = if let Some(strategy_addr) = Self::strategy(env.clone()) {
             let strategy_client = StrategyClient::new(&env, &strategy_addr);
             strategy_client.total_value()
@@ -175,8 +186,6 @@ impl YieldVault {
         };
 
         idle_assets + strategy_assets
-    pub fn total_assets(env: Env) -> i128 {
-        Self::get_state(&env).total_assets
     }
 
     pub fn balance(env: Env, user: Address) -> i128 {
@@ -201,7 +210,7 @@ impl YieldVault {
     }
 
     pub fn configure_korean_strategy(env: Env, strategy: Address) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = get_admin(&env).expect("Admin not set");
         admin.require_auth();
         env.storage()
             .instance()
@@ -209,7 +218,7 @@ impl YieldVault {
     }
 
     pub fn accrue_korean_debt_yield(env: Env) -> i128 {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = get_admin(&env).expect("Admin not set");
         admin.require_auth();
 
         let strategy: Address = env
@@ -232,7 +241,7 @@ impl YieldVault {
     }
 
     pub fn set_dao_threshold(env: Env, threshold: i128) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = get_admin(&env).expect("Admin not set");
         admin.require_auth();
         if threshold <= 0 {
             panic!("threshold must be > 0");
@@ -347,9 +356,8 @@ impl YieldVault {
     ///
     /// ### Authority
     /// Requires `Admin` signature.
-
     pub fn add_shipment(env: Env, shipment_id: u64, status: ShipmentStatus) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = get_admin(&env).expect("Admin not set");
         admin.require_auth();
 
         if env
@@ -375,7 +383,7 @@ impl YieldVault {
     }
 
     pub fn update_shipment_status(env: Env, shipment_id: u64, new_status: ShipmentStatus) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = get_admin(&env).expect("Admin not set");
         admin.require_auth();
 
         let old_status: ShipmentStatus = env
@@ -416,7 +424,6 @@ impl YieldVault {
     /// ### Parameters
     /// * `cursor` - Optional ID to start after.
     /// * `page_size` - Number of items to return (max 50).
-
     pub fn shipment_ids_by_status(
         env: Env,
         status: ShipmentStatus,
@@ -491,7 +498,6 @@ impl YieldVault {
     ///
     /// ### Events
     /// Publishes a `(symbol_short!("deposit"),)` event with `(amount, shares_minted)`.
-
     pub fn deposit(env: Env, user: Address, amount: i128) -> Result<i128, VaultError> {
         let mut state = Self::get_state(&env);
         if state.is_paused {
@@ -512,14 +518,27 @@ impl YieldVault {
             amount * state.total_shares / state.total_assets
         };
 
+        // Prevent silent loss of funds if shares round down to 0
+        if shares_to_mint == 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+
         token_client.transfer(&user, &env.current_contract_address(), &amount);
 
         // Update idle state
-        let ta = env.storage().instance().get::<_, i128>(&DataKey::TotalAssets).unwrap_or(0);
-        env.storage().instance().set(&DataKey::TotalAssets, &(ta + amount));
-        
+        let ta = env
+            .storage()
+            .instance()
+            .get::<_, i128>(&DataKey::TotalAssets)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalAssets, &(ta + amount));
+
         let ts = Self::total_shares(env.clone());
-        env.storage().instance().set(&DataKey::TotalShares, &(ts + shares_to_mint));
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalShares, &(ts + shares_to_mint));
         state.total_assets += amount;
         state.total_shares += shares_to_mint;
         env.storage().instance().set(&DataKey::State, &state);
@@ -543,7 +562,6 @@ impl YieldVault {
     ///
     /// ### Returns
     /// The quantity of underlying tokens returned to the user.
-
     pub fn withdraw(env: Env, user: Address, shares: i128) -> Result<i128, VaultError> {
         let mut state = Self::get_state(&env);
         if state.is_paused {
@@ -571,25 +589,39 @@ impl YieldVault {
         let token_client = token::Client::new(&env, &token_addr);
 
         // Check if vault has enough idle assets, otherwise divest from strategy
-        let mut idle_ta = env.storage().instance().get::<_, i128>(&DataKey::TotalAssets).unwrap_or(0);
+        let mut idle_ta = env
+            .storage()
+            .instance()
+            .get::<_, i128>(&DataKey::TotalAssets)
+            .unwrap_or(0);
         if idle_ta < assets_to_return {
             let needed = assets_to_return - idle_ta;
             Self::divest(env.clone(), needed);
-            idle_ta = env.storage().instance().get::<_, i128>(&DataKey::TotalAssets).unwrap_or(0);
+            idle_ta = env
+                .storage()
+                .instance()
+                .get::<_, i128>(&DataKey::TotalAssets)
+                .unwrap_or(0);
         }
 
         // Transfer assets from vault to user
         token_client.transfer(&env.current_contract_address(), &user, &assets_to_return);
 
         // Update state
-        env.storage().instance().set(&DataKey::TotalAssets, &(idle_ta - assets_to_return));
-        
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalAssets, &(idle_ta - assets_to_return));
+
         let ts = Self::total_shares(env.clone());
-        env.storage().instance().set(&DataKey::TotalShares, &(ts - shares));
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalShares, &(ts - shares));
 
         let vault_balance = Self::balance(env.clone(), user.clone());
-        env.storage().instance().set(&DataKey::ShareBalance(user.clone()), &(vault_balance - shares));
-        token_client.transfer(&env.current_contract_address(), &user, &assets_to_return);
+        env.storage().instance().set(
+            &DataKey::ShareBalance(user.clone()),
+            &(vault_balance - shares),
+        );
 
         state.total_assets -= assets_to_return;
         state.total_shares -= shares;
@@ -608,24 +640,37 @@ impl YieldVault {
 
     /// Move idle funds to the strategy.
     pub fn invest(env: Env, amount: i128) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = get_admin(&env).expect("Admin not set");
         admin.require_auth();
 
         let strategy_addr = Self::strategy(env.clone()).expect("no strategy set");
         let strategy_client = StrategyClient::new(&env, &strategy_addr);
 
-        let mut idle_ta = env.storage().instance().get::<_, i128>(&DataKey::TotalAssets).unwrap_or(0);
-        if idle_ta < amount { panic!("insufficient idle assets"); }
+        let idle_ta = env
+            .storage()
+            .instance()
+            .get::<_, i128>(&DataKey::TotalAssets)
+            .unwrap_or(0);
+        if idle_ta < amount {
+            panic!("insufficient idle assets");
+        }
 
         // Approve and deposit to strategy
         let token_addr = Self::token(env.clone());
         let token_client = token::Client::new(&env, &token_addr);
-        token_client.approve(&env.current_contract_address(), &strategy_addr, &amount, &env.ledger().sequence());
-        
+        token_client.approve(
+            &env.current_contract_address(),
+            &strategy_addr,
+            &amount,
+            &env.ledger().sequence(),
+        );
+
         strategy_client.deposit(&amount);
 
         // Update idle assets
-        env.storage().instance().set(&DataKey::TotalAssets, &(idle_ta - amount));
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalAssets, &(idle_ta - amount));
     }
 
     /// Recall funds from the strategy.
@@ -637,13 +682,19 @@ impl YieldVault {
         strategy_client.withdraw(&amount);
 
         // The strategy contract should have transferred funds back to the vault
-        let idle_ta = env.storage().instance().get::<_, i128>(&DataKey::TotalAssets).unwrap_or(0);
-        env.storage().instance().set(&DataKey::TotalAssets, &(idle_ta + amount));
+        let idle_ta = env
+            .storage()
+            .instance()
+            .get::<_, i128>(&DataKey::TotalAssets)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalAssets, &(idle_ta + amount));
     }
 
     /// Admin function to artificially accrue yield (legacy, but updated for strategy).
     pub fn accrue_yield(env: Env, amount: i128) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = get_admin(&env).expect("Admin not set");
         admin.require_auth();
 
         let token_addr = Self::token(env.clone());
@@ -651,9 +702,14 @@ impl YieldVault {
 
         token_client.transfer(&admin, &env.current_contract_address(), &amount);
 
-        let ta = env.storage().instance().get::<_, i128>(&DataKey::TotalAssets).unwrap_or(0);
-        env.storage().instance().set(&DataKey::TotalAssets, &(ta + amount));
-        token_client.transfer(&admin, &env.current_contract_address(), &amount);
+        let ta = env
+            .storage()
+            .instance()
+            .get::<_, i128>(&DataKey::TotalAssets)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalAssets, &(ta + amount));
 
         let mut state = Self::get_state(&env);
         state.total_assets += amount;
@@ -678,6 +734,15 @@ impl YieldVault {
         let token_addr = Self::token(env.clone());
         let token_client = token::Client::new(&env, &token_addr);
         token_client.transfer(&strategy, &env.current_contract_address(), &amount);
+
+        let ta = env
+            .storage()
+            .instance()
+            .get::<_, i128>(&DataKey::TotalAssets)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalAssets, &(ta + amount));
 
         let mut state = Self::get_state(&env);
         state.total_assets += amount;

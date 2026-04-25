@@ -1,22 +1,67 @@
-import React from 'react';
-import { NavLink } from 'react-router-dom';
-import WalletConnect from './WalletConnect';
-import ThemeToggle from './ThemeToggle';
-import { Layers } from './icons';
+import { useEffect, useState, type FC } from "react";
+import { NavLink } from "react-router-dom";
+import WalletConnect from "./WalletConnect";
+import type { DisconnectReason } from "./WalletConnect";
+import ThemeToggle from "./ThemeToggle";
+import { Layers } from "./icons";
+import { useTranslation } from "../i18n";
+import { networkConfig } from "../config/network";
 
 interface NavbarProps {
+  currentPath?: "/" | "/analytics" | "/portfolio";
+  onNavigate?: (path: "/" | "/analytics" | "/portfolio") => void;
   walletAddress: string | null;
+  usdcBalance?: number;
   onConnect: (address: string) => void;
-  onDisconnect: () => void;
+  onDisconnect: (reason?: DisconnectReason) => void;
 }
 
-const Navbar: React.FC<NavbarProps> = ({
+const Navbar: FC<NavbarProps> = ({
   walletAddress,
+  usdcBalance = 0,
   onConnect,
   onDisconnect,
 }) => {
+  const { t } = useTranslation();
+  const [networkLabel, setNetworkLabel] = useState(
+    networkConfig.isTestnet ? "Testnet" : "Mainnet",
+  );
+
+  useEffect(() => {
+    let active = true;
+
+    const resolveNetworkLabel = async () => {
+      if (!walletAddress) return;
+      try {
+        const freighterApi = await import("@stellar/freighter-api");
+        if (typeof freighterApi.getNetworkDetails !== "function") return;
+
+        const details = await freighterApi.getNetworkDetails();
+        if (!active || !details) return;
+
+        const isMainnet = details.networkPassphrase
+          ?.toLowerCase()
+          .includes("public");
+        setNetworkLabel(isMainnet ? "Mainnet" : "Testnet");
+      } catch {
+        // Keep fallback config-derived label when wallet network cannot be queried.
+      }
+    };
+
+    void resolveNetworkLabel();
+    const interval = window.setInterval(() => {
+      void resolveNetworkLabel();
+    }, 10_000);
+
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [walletAddress]);
+
   return (
     <nav
+      aria-label="Primary"
       style={{
         position: "fixed",
         top: 0,
@@ -51,15 +96,17 @@ const Navbar: React.FC<NavbarProps> = ({
             <span
               style={{
                 fontFamily: "var(--font-display)",
-                fontWeight: 700,
-                fontSize: "1.25rem",
+                fontWeight: "var(--font-bold)",
+                fontSize: "var(--text-xl)",
                 letterSpacing: "-0.02em",
                 color: "var(--text-primary)",
                 marginLeft: "8px",
               }}
             >
-              YieldVault{" "}
-              <span style={{ color: "var(--accent-cyan)" }}>RWA</span>
+              {t("nav.brand.primary")}{" "}
+              <span style={{ color: "var(--accent-cyan)" }}>
+                {t("nav.brand.accent")}
+              </span>
             </span>
           </NavLink>
 
@@ -71,11 +118,11 @@ const Navbar: React.FC<NavbarProps> = ({
                   ? "var(--accent-cyan)"
                   : "var(--text-secondary)",
                 textDecoration: "none",
-                fontWeight: 500,
-                fontSize: "0.95rem",
+                fontWeight: "var(--font-medium)",
+                fontSize: "var(--text-base)",
               })}
             >
-              Vaults
+              {t("nav.vaults")}
             </NavLink>
             <NavLink
               to="/portfolio"
@@ -84,11 +131,11 @@ const Navbar: React.FC<NavbarProps> = ({
                   ? "var(--accent-cyan)"
                   : "var(--text-secondary)",
                 textDecoration: "none",
-                fontWeight: 500,
-                fontSize: "0.95rem",
+                fontWeight: "var(--font-medium)",
+                fontSize: "var(--text-base)",
               })}
             >
-              Portfolio
+              {t("nav.portfolio")}
             </NavLink>
             <NavLink
               to="/analytics"
@@ -97,19 +144,48 @@ const Navbar: React.FC<NavbarProps> = ({
                   ? "var(--accent-cyan)"
                   : "var(--text-secondary)",
                 textDecoration: "none",
-                fontWeight: 500,
-                fontSize: "0.95rem",
+                fontWeight: "var(--font-medium)",
+                fontSize: "var(--text-base)",
               })}
             >
-              Analytics
+              {t("nav.analytics")}
             </NavLink>
           </div>
         </div>
 
         <div className="flex items-center gap-md">
+          {walletAddress ? (
+            <span
+              aria-label="Network badge"
+              title={`Connected network: ${networkLabel}`}
+              style={{
+                padding: "6px 10px",
+                borderRadius: "999px",
+                fontSize: "0.75rem",
+                fontWeight: "var(--font-semibold)",
+                letterSpacing: "0.04em",
+                textTransform: "uppercase",
+                border:
+                  networkLabel === "Mainnet"
+                    ? "1px solid rgba(34, 197, 94, 0.45)"
+                    : "1px solid rgba(56, 189, 248, 0.45)",
+                color:
+                  networkLabel === "Mainnet"
+                    ? "rgb(34, 197, 94)"
+                    : "var(--accent-cyan)",
+                background:
+                  networkLabel === "Mainnet"
+                    ? "rgba(34, 197, 94, 0.08)"
+                    : "rgba(0, 240, 255, 0.08)",
+              }}
+            >
+              {networkLabel}
+            </span>
+          ) : null}
           <ThemeToggle />
           <WalletConnect
             walletAddress={walletAddress}
+            usdcBalance={usdcBalance}
             onConnect={onConnect}
             onDisconnect={onDisconnect}
           />

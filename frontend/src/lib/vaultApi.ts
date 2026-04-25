@@ -1,4 +1,106 @@
-import { createApiClient } from "./api";
+import { Contract, SorobanRpc, TransactionBuilder, BASE_FEE } from "@stellar/stellar-sdk";
+import { networkConfig } from "../config/network";
+import { apiClient } from "./apiClient";
+import { validate, VaultHistoryQuerySchema, DepositRequestSchema, WithdrawalRequestSchema } from "./api";
+
+// ─── Share Price Error ────────────────────────────────────────────────────────
+
+export class SharePriceFetchError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "SharePriceFetchError";
+  }
+}
+
+// ─── Fixed-point decoding ─────────────────────────────────────────────────────
+
+/** 10^18 — the fixed-point divisor used by the vault contract's i128 share price. */
+export const FIXED_POINT_DIVISOR = 1_000_000_000_000_000_000n;
+
+/**
+ * Convert a raw i128 contract value to a JavaScript number.
+ *
+ * Uses BigInt integer division to preserve precision, then converts to number.
+ * The share price range (1.0 ± small yield) is well within Number.MAX_SAFE_INTEGER
+ * after dividing by 10^18.
+ */
+export function decodeSharePrice(raw: bigint): number {
+  const integerPart = raw / FIXED_POINT_DIVISOR;
+  const remainder = raw % FIXED_POINT_DIVISOR;
+  return Number(integerPart) + Number(remainder) / Number(FIXED_POINT_DIVISOR);
+}
+
+// ─── getSharePrice ────────────────────────────────────────────────────────────
+
+/**
+ * Fetch the current share price from the vault contract via Soroban simulation.
+ *
+ * Uses `simulateTransaction` (a read-only view call) — no funded account required.
+ * A well-known placeholder address is used as the transaction source; the simulation
+ * ignores sequence numbers and fees.
+ *
+ * @throws {SharePriceFetchError} on any failure (missing config, RPC error, bad response)
+ */
+export async function getSharePrice(): Promise<number> {
+  if (!networkConfig.contractId) {
+    throw new SharePriceFetchError("Vault contract ID is not configured");
+  }
+
+  const server = new SorobanRpc.Server(networkConfig.rpcUrl);
+  const contract = new Contract(networkConfig.contractId);
+
+  // Soroban simulation does not require a funded account. We use a well-known
+  // testnet placeholder address and fall back to a minimal stub if getAccount fails.
+  const PLACEHOLDER_ADDRESS = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+  const sourceAccount = await server.getAccount(PLACEHOLDER_ADDRESS).catch(() => {
+    // Minimal account-like object sufficient for TransactionBuilder
+    return {
+      accountId: () => PLACEHOLDER_ADDRESS,
+      sequenceNumber: () => "0",
+      incrementSequenceNumber: () => {},
+    };
+  });
+
+  const tx = new TransactionBuilder(
+    sourceAccount as Parameters<typeof TransactionBuilder>[0],
+    {
+      fee: BASE_FEE,
+      networkPassphrase: networkConfig.networkPassphrase,
+    },
+  )
+    .addOperation(contract.call("get_share_price"))
+    .setTimeout(30)
+    .build();
+
+  let simResult: SorobanRpc.Api.SimulateTransactionResponse;
+  try {
+    simResult = await server.simulateTransaction(tx);
+  } catch (cause) {
+    throw new SharePriceFetchError(
+      `RPC call failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+  }
+
+  if (SorobanRpc.Api.isSimulationError(simResult)) {
+    throw new SharePriceFetchError(
+      `Contract simulation error: ${simResult.error}`,
+      { cause: new Error(simResult.error) },
+    );
+  }
+
+  const returnValue = simResult.result?.retval;
+  if (!returnValue) {
+    throw new SharePriceFetchError("Contract returned no value");
+  }
+
+  // The i128 XDR value is accessed via the SDK's scVal helpers.
+  // hi is the high 64 bits (signed), lo is the low 64 bits (unsigned).
+  const raw = returnValue.i128();
+  const rawBigInt = (BigInt(raw.hi) << 64n) | BigInt(raw.lo);
+
+  return decodeSharePrice(rawBigInt);
+}
 
 export interface StrategyMetadata {
   id: string;
@@ -12,6 +114,7 @@ export interface StrategyMetadata {
 
 export interface VaultSummary {
   tvl: number;
+  depositCap: number;
   apy: number;
   participantCount: number;
   monthlyGrowthPct: number;
@@ -23,13 +126,83 @@ export interface VaultSummary {
   strategy: StrategyMetadata;
 }
 
-const apiClient = createApiClient({
-  baseUrl: import.meta.env.VITE_API_BASE_URL,
-  headers: {
-    Accept: "application/json",
-  },
-});
+export interface VaultHistoryPoint {
+  date: string;
+  /** Normalized share price index (100 = baseline). */
+  value: number;
+}
+
+function isValidHistory(data: unknown): data is VaultHistoryPoint[] {
+  return (
+    Array.isArray(data) &&
+    data.length > 0 &&
+    data.every(
+      (p) =>
+        p !== null &&
+        typeof p === "object" &&
+        typeof (p as VaultHistoryPoint).date === "string" &&
+        typeof (p as VaultHistoryPoint).value === "number",
+    )
+  );
+}
+
+/** Mock series when the API returns no points or is unreachable. */
+const MOCK_VAULT_HISTORY: VaultHistoryPoint[] = [
+  { date: "2025-09-24", value: 100 },
+  { date: "2025-10-01", value: 100.32 },
+  { date: "2025-10-08", value: 100.41 },
+  { date: "2025-10-15", value: 100.58 },
+  { date: "2025-10-22", value: 100.72 },
+  { date: "2025-10-29", value: 100.89 },
+  { date: "2025-11-05", value: 101.02 },
+  { date: "2025-11-12", value: 101.15 },
+  { date: "2025-11-19", value: 101.28 },
+  { date: "2025-11-26", value: 101.44 },
+  { date: "2025-12-03", value: 101.58 },
+  { date: "2025-12-10", value: 101.71 },
+  { date: "2025-12-17", value: 101.85 },
+  { date: "2025-12-24", value: 101.98 },
+  { date: "2025-12-31", value: 102.12 },
+  { date: "2026-01-07", value: 102.28 },
+  { date: "2026-01-14", value: 102.41 },
+  { date: "2026-01-21", value: 102.55 },
+  { date: "2026-01-28", value: 102.68 },
+  { date: "2026-02-04", value: 102.82 },
+  { date: "2026-02-11", value: 102.95 },
+  { date: "2026-02-18", value: 103.08 },
+  { date: "2026-02-25", value: 103.22 },
+  { date: "2026-03-04", value: 103.35 },
+  { date: "2026-03-11", value: 103.48 },
+  { date: "2026-03-18", value: 103.61 },
+  { date: "2026-03-25", value: 103.75 },
+];
+
 
 export async function getVaultSummary() {
   return apiClient.get<VaultSummary>("/mock-api/vault-summary.json");
+}
+
+export async function getVaultHistory(params?: unknown): Promise<VaultHistoryPoint[]> {
+  validate(VaultHistoryQuerySchema, params ?? {}, "VaultHistoryQuery");
+  try {
+    const data = await apiClient.get<unknown>("/mock-api/vault-history.json");
+    if (isValidHistory(data)) {
+      return data;
+    }
+  } catch {
+    // Use mock below
+  }
+  return MOCK_VAULT_HISTORY;
+}
+
+export async function submitDeposit(params: unknown) {
+  validate(DepositRequestSchema, params, "DepositRequest");
+  // Simulate backend interaction
+  return new Promise<void>((resolve) => setTimeout(resolve, 2000));
+}
+
+export async function submitWithdrawal(params: unknown) {
+  validate(WithdrawalRequestSchema, params, "WithdrawalRequest");
+  // Simulate backend interaction
+  return new Promise<void>((resolve) => setTimeout(resolve, 2000));
 }
